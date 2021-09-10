@@ -1,10 +1,16 @@
+import imp
 import numpy as np
 import math
 from qutip import create, basis, sigmaz, sigmax, sigmay
 import matplotlib.pyplot as plt
+import tensorflow as tf
+from tensorflow.keras.models import Sequential, Model
+from tensorflow.keras.layers import Input, LSTM, GRU, Dense, Dropout, Bidirectional, LayerNormalization, MultiHeadAttention, Conv1D, GlobalAveragePooling1D
+from tensorflow.keras.losses import BinaryCrossentropy, MeanSquaredError
+from tensorflow.keras.optimizers import Adam
 
 
-class quantum_system():
+class Quantum_System():
     def __init__(self, omega_r = 2*np.pi*0.80, kai = -2*np.pi*0.18, qubit_initial = 0, cavity_initial = 1, superposition= False):
         self.planck = 1.0545718*10**(-34)
         self.omega_r = omega_r
@@ -53,15 +59,15 @@ class quantum_system():
     def prob(self, c, q,t):
         return (abs(np.dot(self.bra_m(c, q).T, np.dot(self.exp_H(t), self.psi0))))**2
 
-    def monte_carlo(self, n, n_sample, t_i, t_f):
+    def monte_carlo(self, n_sample, n_times, t_i, t_f):
         import random
         import itertools
         #prob_index = [(i,j) for i,j in itertools.product(range(self.n_cavity),range(2))]
-        outcome = np.zeros((self.n_cavity * 2, n))
-        dt = (t_f - t_i)/(n-1)
+        outcome = np.zeros((self.n_cavity * 2, n_times))
+        dt = (t_f - t_i)/(n_times-1)
 
         t = t_i
-        for z in range(n):
+        for z in range(n_times):
             prob_list = [self.prob(i,j,t).reshape(1)[0] for i,j in itertools.product(range(self.n_cavity),range(2))]
             prob_line = np.cumsum(prob_list)
             for _ in range(n_sample):
@@ -81,52 +87,118 @@ class quantum_system():
 
         return df   
     
-    def preprocess(self, df, split_ratio, time_step):
-        if self.superposition==True:
-            df = df.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
+    def preprocess(self, data, split_ratio, time_step):
+        if self.superposition:
+            dataset = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
         else:
-            df = df.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
+            dataset = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
         
-        split = int(len(df)*split_ratio)
-        train = df.iloc[:split]
-        test = df.iloc[split:]
+        split = int(len(dataset)*split_ratio)
+        train = dataset.iloc[:split]
+        test = dataset.iloc[split:]
 
-        def dataset(data, window_size):
-            X_list, y_list = [], []
+        def create_dataset(data, window_size):
+            X, y = [], []
             for i in range(len(data) - window_size):
-                X_list.append(np.array(data.iloc[i:i+window_size,:]))
-                y_list.append(np.array(data.iloc[i+window_size, :]))
-            return np.array(X_list), np.array(y_list) 
+                X.append(np.array(data.iloc[i:i+window_size,:]))
+                y.append(np.array(data.iloc[i+window_size, :]))
+            return np.array(X), np.array(y) 
 
-        train_X, train_y = dataset(train, time_step)
-        test_X, test_y = dataset(test, time_step)
+        train_feature, train_label = create_dataset(train, time_step)
+        test_feature, test_label = create_dataset(test, time_step)
 
-        return train_X, train_y, test_X, test_y
+        return train_feature, train_label, test_feature, test_label
 
-class Model():
+class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, key_dim, warmup_steps=4000):
+        super(CustomLearningSchedule, self).__init__()
+        self.d_model = tf.cast(key_dim, tf.float32)
+        self.warmup_steps = warmup_steps
+    
+    def __call__(self, step):
+        param_1 = tf.math.rsqrt(step)
+        param_2 = step * (self.warmup_steps**(-1.5))
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
+
+class Models():
     def __init__(self, df, train_feature, train_label, test_feature, test_label):
         self.df = df
         self.train_feature, self.train_label, self.test_feature, self.test_label = train_feature, train_label, test_feature, test_label
+    
+        self.dropout_rate = 0.2
+        self.units = 128
+        self.input_shape = (self.train_feature.shape[1],self.train_feature.shape[2])
 
     def LSTM(self):
-        import tensorflow as tf
-        from tensorflow.keras.models import Sequential
-        from tensorflow.keras.layers import LSTM, GRU, Dense, Dropout, Bidirectional
-
         model = Sequential()
-        model.add(LSTM(256,activation='tanh',input_shape=(self.train_feature.shape[1],self.train_feature.shape[2]), dropout=0.2))
+        model.add(LSTM(self.units,activation='tanh',input_shape=(self.train_feature.shape[1],self.train_feature.shape[2]), dropout=self.dropout_rate))
         #model.add(Dropout(0.2))
         model.add(Dense(self.train_feature.shape[2], activation='linear'))
-        model.compile(loss=tf.keras.losses.BinaryCrossentropy(), optimizer='adam', metrics=[tf.keras.metrics.BinaryCrossentropy()])
+        model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
+        return model
+
+    def BiLSTM(self):
+        model = Sequential()
+        model.add(Bidirectional(LSTM(self.units,activation='tanh',input_shape=self.input_shape, dropout=self.dropout_rate)))
+        #model.add(Dropout(0.2))
+        model.add(Dense(self.train_feature.shape[2], activation='linear'))
+        model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
+        return model
+
+    def transformer_encoder(self, inputs, key_dim, num_heads, ff_dim):
+        # Normalization and Attention
+        x = LayerNormalization(epsilon=1e-6)(inputs)
+        x = MultiHeadAttention(key_dim=key_dim, num_heads=num_heads, dropout=self.dropout_rate)(x, x)
+        x = tf.keras.layers.Dropout(self.dropout_rate)(x)
+        res = x + inputs
+
+        # Feed Forward
+        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(res)
+        x = tf.keras.layers.Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
+        x = tf.keras.layers.Dropout(self.dropout_rate)(x)
+        x = tf.keras.layers.Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
+        return x + res
+
+    def Transfomer(self, key_dim, num_heads, ff_dim, num_blocks):
+        inputs = Input(shape=self.input_shape)
+        x = Bidirectional(LSTM(self.units, return_sequences=True))(inputs)
+        for _ in range(num_blocks):
+            x = self.transformer_encoder(x, key_dim, num_heads, ff_dim)
+
+        avg_pool  = GlobalAveragePooling1D()(x)
+        #max_pool = layers.GlobalMaxPooling1D()(x)
+        #conc = layers.concatenate([avg_pool, max_pool])
+        conc = Dense(self.units)(avg_pool)
+        outputs = Dense(self.train_feature.shape[2])(conc) 
+        model = Model(inputs, outputs)
+        model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
 
         return model
-    
+
+    def Transfomer_conv(self, key_dim, num_heads, ff_dim, num_blocks):
+        inputs = Input(shape=self.input_shape)
+        x = Conv1D(filters=self.units, kernel_size=self.train_feature.shape[1], padding='causal')(inputs)
+        for _ in range(num_blocks):
+            x = self.transformer_encoder(x, key_dim, num_heads, ff_dim)
+
+        avg_pool  = GlobalAveragePooling1D()(x)
+        #max_pool = layers.GlobalMaxPooling1D()(x)
+        #conc = layers.concatenate([avg_pool, max_pool])
+        conc = Dense(self.units)(avg_pool)
+        outputs = Dense(self.train_feature.shape[2])(conc) 
+        model = Model(inputs, outputs)
+        model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
+
+        return model
+
     def fit(self, model, epochs = 100, batch_size = 128, show_loss = True):
         from tensorflow.keras.callbacks import EarlyStopping,ModelCheckpoint
         early_stopping = EarlyStopping(monitor='val_loss', verbose=1, patience=50)
-        
+    
         history = model.fit(self.train_feature, self.train_label, batch_size = batch_size ,epochs=epochs,validation_split=0.2, verbose=1, callbacks = [early_stopping])
-        
+        train_loss = model.evaluate(self.train_feature, self.train_label)[0]
+        print('train loss: {}'.format(train_loss))
+
         if show_loss:
             plt.figure(figsize=(12,8))
             plt.plot(history.history['loss'], label = 'loss')
@@ -138,10 +210,11 @@ class Model():
     
     def predict(self, model, show_plot = True):
         predict = model.predict(self.test_feature)
-
-        from sklearn.metrics import mean_squared_error, r2_score
-        print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
-        print('r2: {}'.format(r2_score(self.test_label, predict)))
+        test_loss = model.evaluate(self.test_feature, self.test_label)[0]
+        print('test loss: {}'.format(test_loss))
+        #from sklearn.metrics import mean_squared_error, r2_score
+        #print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
+        #print('r2: {}'.format(r2_score(self.test_label, predict)))
 
         if show_plot:
             plt.figure(figsize=(12,8))
