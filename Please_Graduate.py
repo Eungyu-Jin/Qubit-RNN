@@ -89,13 +89,13 @@ class Quantum_System():
     
     def preprocess(self, data, split_ratio, time_step):
         if self.superposition:
-            dataset = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
+            df = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
         else:
-            dataset = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
+            df = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
         
-        split = int(len(dataset)*split_ratio)
-        train = dataset.iloc[:split]
-        test = dataset.iloc[split:]
+        split = int(len(df)*split_ratio)
+        train = df.iloc[:split]
+        test = df.iloc[split:]
 
         def create_dataset(data, window_size):
             X, y = [], []
@@ -107,7 +107,7 @@ class Quantum_System():
         train_feature, train_label = create_dataset(train, time_step)
         test_feature, test_label = create_dataset(test, time_step)
 
-        return train_feature, train_label, test_feature, test_label
+        return train_feature, train_label, test_feature, test_label, df
 
 class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, key_dim, warmup_steps=4000):
@@ -121,9 +121,9 @@ class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule)
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
 
 class Models():
-    def __init__(self, df, train_feature, train_label, test_feature, test_label):
-        self.df = df
+    def __init__(self, train_feature, train_label, test_feature, test_label, df):
         self.train_feature, self.train_label, self.test_feature, self.test_label = train_feature, train_label, test_feature, test_label
+        self.df = df
     
         self.dropout_rate = 0.2
         self.units = 128
@@ -149,14 +149,14 @@ class Models():
         # Normalization and Attention
         x = LayerNormalization(epsilon=1e-6)(inputs)
         x = MultiHeadAttention(key_dim=key_dim, num_heads=num_heads, dropout=self.dropout_rate)(x, x)
-        x = tf.keras.layers.Dropout(self.dropout_rate)(x)
+        x = Dropout(self.dropout_rate)(x)
         res = x + inputs
 
         # Feed Forward
-        x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(res)
-        x = tf.keras.layers.Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
-        x = tf.keras.layers.Dropout(self.dropout_rate)(x)
-        x = tf.keras.layers.Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
+        x = LayerNormalization(epsilon=1e-6)(res)
+        x = Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
+        x = Dropout(self.dropout_rate)(x)
+        x = Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
         return x + res
 
     def Transfomer(self, key_dim, num_heads, ff_dim, num_blocks):
@@ -193,11 +193,11 @@ class Models():
 
         return model
 
-    def fit(self, model, epochs = 100, batch_size = 128, show_loss = True):
+    def fit(self, model, epochs = 100, batch_size = 128, verbose = 1, show_loss = True):
         from tensorflow.keras.callbacks import EarlyStopping,ModelCheckpoint
-        early_stopping = EarlyStopping(monitor='val_loss', verbose=1, patience=50)
+        early_stopping = EarlyStopping(monitor='val_loss', verbose=verbose, patience=50)
     
-        history = model.fit(self.train_feature, self.train_label, batch_size = batch_size ,epochs=epochs,validation_split=0.2, verbose=1, callbacks = [early_stopping])
+        history = model.fit(self.train_feature, self.train_label, batch_size = batch_size ,epochs=epochs,validation_split=0.2, verbose=verbose, callbacks = [early_stopping])
         train_loss = model.evaluate(self.train_feature, self.train_label)[0]
         print('train loss: {}'.format(train_loss))
 
@@ -214,18 +214,71 @@ class Models():
         predict = model.predict(self.test_feature)
         test_loss = model.evaluate(self.test_feature, self.test_label)[0]
         print('test loss: {}'.format(test_loss))
-        #from sklearn.metrics import mean_squared_error, r2_score
-        #print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
-        #print('r2: {}'.format(r2_score(self.test_label, predict)))
+        from sklearn.metrics import mean_squared_error, r2_score
+        print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
+        print('r2: {}'.format(r2_score(self.test_label, predict)))
+        cavity = int(self.df.columns[0]/2)
+        qubit = 0
+        if len(self.df.columns) == 2:
+            labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1)]
+        else:
+            labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1), "cavity {} & qubit {}".format(cavity+1, qubit), "cavity {} & qubit {}".format(cavity+1, qubit+1)]
 
         if show_plot:
             plt.figure(figsize=(12,8))
             plt.subplot(211)
             plt.plot(self.df.index[-self.test_label.shape[0]:],predict)
             plt.title("Predict")
+            plt.xlabel("time")
+            plt.ylabel("probabilty")
+            plt.legend(loc = 'upper right', labels = labels)
 
             plt.subplot(212)
             plt.plot(self.df.index[-self.test_label.shape[0]:], self.test_label)
             plt.title("Test Label")
+            plt.xlabel("time")
+            plt.ylabel("probabilty")
+            plt.legend(loc = 'upper right', labels = labels)
+
+            plt.tight_layout()
             plt.show()
 
+class Experiment():
+    def __init__(self, qubit_initial = 0, cavity_initial=1,superposition=False, n_samples=100, n_times=100, t_i=0, t_f=1):
+        self.omega_r = 2*np.pi*0.80
+        self.kai = -2*np.pi*0.18
+
+        #model fit setting
+        self.split_ratio = 0.75
+        self.time_step = 10
+        self.qubit_initial = qubit_initial
+        self.cavity_initial = cavity_initial
+        self.superposition = superposition
+        self.n_samples = n_samples
+        self.n_times = n_times
+        self.t_i, self.t_f = t_i, t_f
+
+        #transformer setting
+        self.key_dim = 256
+        self.num_heads = 4
+        self.ff_dim = 128
+        self.num_blocks = 2
+
+    def Run_system(self, model = 'LSTM', epochs=100, batch_size =100):
+        experiment = Quantum_System(omega_r=self.omega_r, kai=self.kai, qubit_initial=self.qubit_initial, cavity_initial=self.cavity_initial, superposition=self.superposition)
+        df = experiment.monte_carlo(n_sample=self.n_samples,  n_times=self.n_times, t_i=self.t_i, t_f=self.t_f)
+        train_X, train_y, test_X, test_y, df = experiment.preprocess(data = df, split_ratio=self.split_ratio, time_step=self.time_step)
+        Model = Models(train_X, train_y, test_X, test_y, df)
+        if model == 'LSTM':
+            rnn = Model.LSTM()
+        elif model == 'BiLSTM':
+            rnn = Model.BiLSTM()
+        elif model == 'Transformer':
+            rnn = Model.Transfomer(key_dim=self.key_dim, num_heads=self.num_heads, ff_dim = self.ff_dim, num_blocks=self.num_blocks)
+        elif model == 'Transformer_conv':
+            rnn = Model.Transfomer_conv(key_dim=self.key_dim, num_heads=self.num_heads, ff_dim = self.ff_dim, num_blocks=self.num_blocks)
+        else:
+            print('Error')
+
+        rnn, _ = Model.fit(rnn,epochs=epochs, batch_size = batch_size, verbose=0, show_loss = True)
+        Model.predict(rnn,show_plot=True)
