@@ -1,4 +1,4 @@
-# Physics graduation paper python code
+# HYU Physics graduation paper python code
 
 RNN to reconstruct Qubit time evolution
 
