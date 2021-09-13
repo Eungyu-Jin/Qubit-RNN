@@ -133,7 +133,7 @@ class Models():
         model = Sequential()
         model.add(LSTM(self.units,activation='tanh',input_shape=(self.train_feature.shape[1],self.train_feature.shape[2]), dropout=self.dropout_rate))
         #model.add(Dropout(0.2))
-        model.add(Dense(self.train_feature.shape[2], activation='linear'))
+        model.add(Dense(self.train_feature.shape[2], activation='sigmoid'))
         model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
         return model
 
@@ -141,7 +141,7 @@ class Models():
         model = Sequential()
         model.add(Bidirectional(LSTM(self.units,activation='tanh',input_shape=self.input_shape, dropout=self.dropout_rate)))
         #model.add(Dropout(0.2))
-        model.add(Dense(self.train_feature.shape[2], activation='linear'))
+        model.add(Dense(self.train_feature.shape[2], activation='sigmoid'))
         model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
         return model
 
@@ -168,10 +168,11 @@ class Models():
         avg_pool  = GlobalAveragePooling1D()(x)
         #max_pool = layers.GlobalMaxPooling1D()(x)
         #conc = layers.concatenate([avg_pool, max_pool])
-        conc = Dense(self.units)(avg_pool)
-        outputs = Dense(self.train_feature.shape[2])(conc) 
+        conc = Dense(self.units, activation='sigmoid')(avg_pool)
+        outputs = Dense(self.train_feature.shape[2], activation='sigmoid')(conc) 
         model = Model(inputs, outputs)
-        model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
+        #model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
+        model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
 
         return model
 
@@ -184,10 +185,11 @@ class Models():
         avg_pool  = GlobalAveragePooling1D()(x)
         #max_pool = layers.GlobalMaxPooling1D()(x)
         #conc = layers.concatenate([avg_pool, max_pool])
-        conc = Dense(self.units)(avg_pool)
-        outputs = Dense(self.train_feature.shape[2])(conc) 
+        conc = Dense(self.units, activation='sigmoid')(avg_pool)
+        outputs = Dense(self.train_feature.shape[2], activation='sigmoid')(conc) 
         model = Model(inputs, outputs)
-        model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
+        #model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
+        model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
 
         return model
 
