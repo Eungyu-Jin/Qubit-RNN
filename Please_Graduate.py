@@ -1,4 +1,3 @@
-import imp
 import numpy as np
 import math
 from qutip import create, basis, sigmaz, sigmax, sigmay
@@ -63,45 +62,49 @@ class Quantum_System():
         import random
         import itertools
         #prob_index = [(i,j) for i,j in itertools.product(range(self.n_cavity),range(2))]
-        outcome = np.zeros((self.n_cavity * 2, n_times))
+        experiment = np.zeros((self.n_cavity * 2, n_times))
+        theory = []
         dt = (t_f - t_i)/(n_times-1)
 
         t = t_i
         for z in range(n_times):
             prob_list = [self.prob(i,j,t).reshape(1)[0] for i,j in itertools.product(range(self.n_cavity),range(2))]
+            theory.append(prob_list)
             prob_line = np.cumsum(prob_list)
             for _ in range(n_sample):
                 random_num = random.random()
                 for k in range(len(prob_line)):
                     if k == 0 and random_num < prob_line[k]:
-                        outcome[k, z] += 1
+                        experiment[k, z] += 1
                     elif prob_line[k-1] <= random_num and random_num < prob_line[k]:
-                        outcome[k, z] += 1
+                        experiment[k, z] += 1
                 t += dt
         
-        relative_prob = outcome/n_sample
+        relative_prob = experiment/n_sample
 
         import pandas as pd
-        df = pd.DataFrame(relative_prob.T)
-        df.index = np.linspace(t_i,t_f,n_sample)
+        df_experiment = pd.DataFrame(relative_prob.T)
+        df_theory = pd.DataFrame(theory)
+        df_experiment.index = np.linspace(t_i,t_f,n_sample)
+        df_theory.index = np.linspace(t_i,t_f,n_sample)
 
-        return df   
+        return df_experiment, df_theory   
     
-    def preprocess(self, data, split_ratio, time_step):
+    def preprocess(self, dataset, split_ratio, time_step):
         if self.superposition:
-            df = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
+            df = dataset.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
         else:
-            df = data.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
+            df = dataset.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
         
         split = int(len(df)*split_ratio)
         train = df.iloc[:split]
         test = df.iloc[split:]
 
-        def create_dataset(data, window_size):
+        def create_dataset(dataset, window_size):
             X, y = [], []
-            for i in range(len(data) - window_size):
-                X.append(np.array(data.iloc[i:i+window_size,:]))
-                y.append(np.array(data.iloc[i+window_size, :]))
+            for i in range(len(dataset) - window_size):
+                X.append(np.array(dataset.iloc[i:i+window_size,:]))
+                y.append(np.array(dataset.iloc[i+window_size, :]))
             return np.array(X), np.array(y) 
 
         train_feature, train_label = create_dataset(train, time_step)
@@ -121,12 +124,12 @@ class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule)
         return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
 
 class Models():
-    def __init__(self, train_feature, train_label, test_feature, test_label, df):
-        self.train_feature, self.train_label, self.test_feature, self.test_label = train_feature, train_label, test_feature, test_label
-        self.df = df
-    
+    def __init__(self, df_experiment, df_theory):
+        self.df_theory = df_theory
+        self.train_feature, self.train_label, self.test_feature, self.test_label,self.df_experiment = Quantum_System.preprocess(dataset=df_experiment, split_ratio=0.75, time_step=10)
+
         self.dropout_rate = 0.2
-        self.units = 128
+        self.units = 32
         self.input_shape = (self.train_feature.shape[1],self.train_feature.shape[2])
 
     def LSTM(self):
