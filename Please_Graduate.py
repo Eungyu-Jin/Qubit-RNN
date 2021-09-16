@@ -1,5 +1,4 @@
 import numpy as np
-import math
 from qutip import create, basis, sigmaz, sigmax, sigmay
 import matplotlib.pyplot as plt
 import tensorflow as tf
@@ -38,6 +37,7 @@ class Quantum_System():
 
         if self.superposition == True:
             self.cavity_state = (basis(self.n_cavity, self.cavity_initial) + basis(self.n_cavity,self.cavity_initial+1))/np.sqrt(2)
+            #self.cavity_state = (basis(self.n_cavity, self.cavity_initial) - basis(self.n_cavity,self.cavity_initial+1))/np.sqrt(2)
         else:
             self.cavity_state = basis(self.n_cavity, self.cavity_initial)
 
@@ -120,7 +120,7 @@ class Quantum_System():
 class Models():
     def __init__(self,qunatum_system, df_experiment, df_theory):
         self.df_experiment, self.df_theory = qunatum_system.slice_df(df_experiment, df_theory)
-        self.train_feature, self.train_label, self.test_feature, self.test_label = qunatum_system.preprocess(dataset=self.df_experiment, split_ratio=0.75, time_step=10)
+        self.train_feature, self.train_label, self.test_feature, self.test_label = qunatum_system.preprocess(df=self.df_experiment, split_ratio=0.75, time_step=10)
 
         self.dropout_rate = 0.2
         self.units = 32
@@ -215,31 +215,43 @@ class Models():
         from sklearn.metrics import mean_squared_error, r2_score
         print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
         print('r2: {}'.format(r2_score(self.test_label, predict)))
+
         cavity = int(self.df_experiment.columns[0]/2)
         qubit = 0
         if len(self.df_experiment.columns) == 2:
-            labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1)]
+            #labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1)]
+            labels = ["|0>", "|1>"]
         else:
-            labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1), "cavity {} & qubit {}".format(cavity+1, qubit), "cavity {} & qubit {}".format(cavity+1, qubit+1)]
+            #labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1), "cavity {} & qubit {}".format(cavity+1, qubit), "cavity {} & qubit {}".format(cavity+1, qubit+1)]
+            labels = ["|00>", "|01>", "|10>", "|11>"] 
 
         if show_plot:
-            plt.figure(figsize=(12,8))
-            plt.subplot(211)
+            plt.figure(figsize=(14,8))
+            plt.subplot(311)
             plt.plot(self.df_experiment.index[-self.test_label.shape[0]:],predict)
             plt.title("Predict")
             plt.xlabel("time")
             plt.ylabel("probabilty")
             plt.legend(loc = 'upper right', labels = labels)
 
-            plt.subplot(212)
+            plt.subplot(312)
             plt.plot(self.df_experiment.index[-self.test_label.shape[0]:], self.test_label)
-            plt.title("Test Label")
+            plt.title("Test Experiment")
+            plt.xlabel("time")
+            plt.ylabel("probabilty")
+            plt.legend(loc = 'upper right', labels = labels)
+
+            plt.subplot(313)
+            plt.plot(self.df_theory.index[-self.test_label.shape[0]:], self.test_label)
+            plt.title("Test Theory")
             plt.xlabel("time")
             plt.ylabel("probabilty")
             plt.legend(loc = 'upper right', labels = labels)
 
             plt.tight_layout()
             plt.show()
+        
+        return predict
 
 class Experiment():
     def __init__(self, qubit_initial = 0, cavity_initial=1,superposition=False, n_samples=100, n_times=100, t_i=0, t_f=1):
@@ -263,10 +275,9 @@ class Experiment():
         self.num_blocks = 2
 
     def Run_system(self, model = 'LSTM', epochs=100, batch_size =100):
-        experiment = Quantum_System(omega_r=self.omega_r, kai=self.kai, qubit_initial=self.qubit_initial, cavity_initial=self.cavity_initial, superposition=self.superposition)
-        df = experiment.monte_carlo(n_sample=self.n_samples,  n_times=self.n_times, t_i=self.t_i, t_f=self.t_f)
-        train_X, train_y, test_X, test_y, df = experiment.preprocess(data = df, split_ratio=self.split_ratio, time_step=self.time_step)
-        Model = Models(train_X, train_y, test_X, test_y, df)
+        qs = Quantum_System(omega_r=self.omega_r, kai=self.kai, qubit_initial=self.qubit_initial, cavity_initial=self.cavity_initial, superposition=self.superposition)
+        df_experiment, df_theory = qs.monte_carlo(n_sample=self.n_samples,  n_times=self.n_times, t_i=self.t_i, t_f=self.t_f)
+        Model = Models(qunatum_system=qs, df_experiment = df_experiment, df_theory=df_theory)
         if model == 'LSTM':
             rnn = Model.LSTM()
         elif model == 'BiLSTM':
@@ -279,15 +290,4 @@ class Experiment():
             print('Error')
 
         rnn, _ = Model.fit(rnn,epochs=epochs, batch_size = batch_size, verbose=0, show_loss = True)
-        Model.predict(rnn,show_plot=True)
-
-class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, key_dim, warmup_steps=4000):
-        super(CustomLearningSchedule, self).__init__()
-        self.d_model = tf.cast(key_dim, tf.float32)
-        self.warmup_steps = warmup_steps
-    
-    def __call__(self, step):
-        param_1 = tf.math.rsqrt(step)
-        param_2 = step * (self.warmup_steps**(-1.5))
-        return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
+        _ =  Model.predict(rnn,show_plot=True)
