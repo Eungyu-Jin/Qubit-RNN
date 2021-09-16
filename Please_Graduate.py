@@ -90,12 +90,17 @@ class Quantum_System():
 
         return df_experiment, df_theory   
     
-    def preprocess(self, dataset, split_ratio, time_step):
+    def slice_df(self, df_experiment, df_theory):
         if self.superposition:
-            df = dataset.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
+            df_experiment_slice = df_experiment.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
+            df_theory_slice = df_theory.iloc[:,self.cavity_initial*2: (self.cavity_initial + 2)*2]
         else:
-            df = dataset.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
+            df_experiment_slice = df_experiment.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
+            df_theory_slice = df_theory.iloc[:,self.cavity_initial*2: (self.cavity_initial + 1)*2]
         
+        return df_experiment_slice, df_theory_slice
+
+    def preprocess(self, df, split_ratio, time_step):
         split = int(len(df)*split_ratio)
         train = df.iloc[:split]
         test = df.iloc[split:]
@@ -110,23 +115,12 @@ class Quantum_System():
         train_feature, train_label = create_dataset(train, time_step)
         test_feature, test_label = create_dataset(test, time_step)
 
-        return train_feature, train_label, test_feature, test_label, df
-
-class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
-    def __init__(self, key_dim, warmup_steps=4000):
-        super(CustomLearningSchedule, self).__init__()
-        self.d_model = tf.cast(key_dim, tf.float32)
-        self.warmup_steps = warmup_steps
-    
-    def __call__(self, step):
-        param_1 = tf.math.rsqrt(step)
-        param_2 = step * (self.warmup_steps**(-1.5))
-        return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
+        return train_feature, train_label, test_feature, test_label
 
 class Models():
-    def __init__(self, df_experiment, df_theory):
-        self.df_theory = df_theory
-        self.train_feature, self.train_label, self.test_feature, self.test_label,self.df_experiment = Quantum_System.preprocess(dataset=df_experiment, split_ratio=0.75, time_step=10)
+    def __init__(self,qunatum_system, df_experiment, df_theory):
+        self.df_experiment, self.df_theory = qunatum_system.slice_df(df_experiment, df_theory)
+        self.train_feature, self.train_label, self.test_feature, self.test_label = qunatum_system.preprocess(dataset=self.df_experiment, split_ratio=0.75, time_step=10)
 
         self.dropout_rate = 0.2
         self.units = 32
@@ -217,12 +211,13 @@ class Models():
         predict = model.predict(self.test_feature)
         test_loss = model.evaluate(self.test_feature, self.test_label)[0]
         print('test loss: {}'.format(test_loss))
+        
         from sklearn.metrics import mean_squared_error, r2_score
         print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
         print('r2: {}'.format(r2_score(self.test_label, predict)))
-        cavity = int(self.df.columns[0]/2)
+        cavity = int(self.df_experiment.columns[0]/2)
         qubit = 0
-        if len(self.df.columns) == 2:
+        if len(self.df_experiment.columns) == 2:
             labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1)]
         else:
             labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1), "cavity {} & qubit {}".format(cavity+1, qubit), "cavity {} & qubit {}".format(cavity+1, qubit+1)]
@@ -230,14 +225,14 @@ class Models():
         if show_plot:
             plt.figure(figsize=(12,8))
             plt.subplot(211)
-            plt.plot(self.df.index[-self.test_label.shape[0]:],predict)
+            plt.plot(self.df_experiment.index[-self.test_label.shape[0]:],predict)
             plt.title("Predict")
             plt.xlabel("time")
             plt.ylabel("probabilty")
             plt.legend(loc = 'upper right', labels = labels)
 
             plt.subplot(212)
-            plt.plot(self.df.index[-self.test_label.shape[0]:], self.test_label)
+            plt.plot(self.df_experiment.index[-self.test_label.shape[0]:], self.test_label)
             plt.title("Test Label")
             plt.xlabel("time")
             plt.ylabel("probabilty")
@@ -285,3 +280,14 @@ class Experiment():
 
         rnn, _ = Model.fit(rnn,epochs=epochs, batch_size = batch_size, verbose=0, show_loss = True)
         Model.predict(rnn,show_plot=True)
+
+class CustomLearningSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    def __init__(self, key_dim, warmup_steps=4000):
+        super(CustomLearningSchedule, self).__init__()
+        self.d_model = tf.cast(key_dim, tf.float32)
+        self.warmup_steps = warmup_steps
+    
+    def __call__(self, step):
+        param_1 = tf.math.rsqrt(step)
+        param_2 = step * (self.warmup_steps**(-1.5))
+        return tf.math.rsqrt(self.d_model) * tf.math.minimum(param_1, param_2)
