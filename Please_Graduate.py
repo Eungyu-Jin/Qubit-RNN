@@ -3,16 +3,16 @@ from qutip import create, basis, sigmaz, sigmax, sigmay
 import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras.models import Sequential, Model
-from tensorflow.keras.layers import Input, LSTM, GRU, Dense, Dropout, Bidirectional, LayerNormalization, MultiHeadAttention, Conv1D, GlobalAveragePooling1D
+from tensorflow.keras.layers import Input, concatenate, LSTM, GRU, Dense, Dropout, Bidirectional, LayerNormalization, MultiHeadAttention, Conv1D, GlobalAveragePooling1D, GlobalMaxPooling1D, SpatialDropout1D
 from tensorflow.keras.losses import BinaryCrossentropy, MeanSquaredError
 from tensorflow.keras.optimizers import Adam
 
 
 class Quantum_System():
-    def __init__(self, omega_r = 2*np.pi*0.80, kai = -2*np.pi*0.18, qubit_initial = 0, cavity_initial = 1, superposition= False):
+    def __init__(self, qubit_initial = 0, cavity_initial = 1, superposition= False):
         self.planck = 1.0545718*10**(-34)
-        self.omega_r = omega_r
-        self.kai = kai
+        self.omega_r = 2*np.pi*0.80
+        self.kai = -2*np.pi*0.18
         self.kappa = 2*np.pi*(7.2) #MHz * time = t
         # dt = 1e-3 : 1e-9 actual
         # times = n * dt
@@ -100,37 +100,43 @@ class Quantum_System():
         
         return df_experiment_slice, df_theory_slice
 
-    def preprocess(self, df, split_ratio, time_step):
+    def preprocess(self, df, time_step):
+        split_ratio = 0.8
         split = int(len(df)*split_ratio)
         train = df.iloc[:split]
         test = df.iloc[split:]
 
+        from sklearn.preprocessing import MinMaxScaler, StandardScaler
+        scaler = MinMaxScaler()
+        train_scale = scaler.fit_transform(train) 
+        test_scale = scaler.transform(test)
+
         def create_dataset(dataset, window_size):
             X, y = [], []
             for i in range(len(dataset) - window_size):
-                X.append(np.array(dataset.iloc[i:i+window_size,:]))
-                y.append(np.array(dataset.iloc[i+window_size, :]))
+                X.append(np.array(dataset[i:i+window_size,:]))
+                y.append(np.array(dataset[i+window_size, :]))
             return np.array(X), np.array(y) 
 
-        train_feature, train_label = create_dataset(train, time_step)
-        test_feature, test_label = create_dataset(test, time_step)
+        train_X, train_y = create_dataset(train_scale, time_step)
+        test_X, test_y = create_dataset(test_scale, time_step)
 
-        return train_feature, train_label, test_feature, test_label
+        return train_X, train_y, test_X, test_y, scaler
 
 class Models():
     def __init__(self,qunatum_system, df_experiment, df_theory):
         self.df_experiment, self.df_theory = qunatum_system.slice_df(df_experiment, df_theory)
-        self.train_feature, self.train_label, self.test_feature, self.test_label = qunatum_system.preprocess(df=self.df_experiment, split_ratio=0.75, time_step=10)
+        self.train_X, self.train_y, self.test_X, self.test_y, self.scaler = qunatum_system.preprocess(df=self.df_experiment, time_step=10)
 
         self.dropout_rate = 0.2
-        self.units = 32
-        self.input_shape = (self.train_feature.shape[1],self.train_feature.shape[2])
+        self.units = 64
+        self.input_shape = (self.train_X.shape[1],self.train_X.shape[2])
 
     def LSTM(self):
         model = Sequential()
-        model.add(LSTM(self.units,activation='tanh',input_shape=(self.train_feature.shape[1],self.train_feature.shape[2]), dropout=self.dropout_rate))
+        model.add(LSTM(self.units,activation='tanh',input_shape=(self.train_X.shape[1],self.train_X.shape[2]), dropout=self.dropout_rate))
         #model.add(Dropout(0.2))
-        model.add(Dense(self.train_feature.shape[2], activation='sigmoid'))
+        model.add(Dense(self.train_X.shape[2], activation='sigmoid'))
         model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
         return model
 
@@ -138,7 +144,7 @@ class Models():
         model = Sequential()
         model.add(Bidirectional(LSTM(self.units,activation='tanh',input_shape=self.input_shape, dropout=self.dropout_rate)))
         #model.add(Dropout(0.2))
-        model.add(Dense(self.train_feature.shape[2], activation='sigmoid'))
+        model.add(Dense(self.train_X.shape[2], activation='sigmoid'))
         model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
         return model
 
@@ -152,38 +158,27 @@ class Models():
         # Feed Forward
         x = LayerNormalization(epsilon=1e-6)(res)
         x = Conv1D(filters=ff_dim, kernel_size=1, activation="relu")(x)
-        x = Dropout(self.dropout_rate)(x)
+        x = SpatialDropout1D(self.dropout_rate)(x)
         x = Conv1D(filters=inputs.shape[-1], kernel_size=1)(x)
         return x + res
 
-    def Transfomer(self, key_dim, num_heads, ff_dim, num_blocks):
-        inputs = Input(shape=self.input_shape)
-        x = Bidirectional(LSTM(self.units, return_sequences=True))(inputs)
-        for _ in range(num_blocks):
-            x = self.transformer_encoder(x, key_dim, num_heads, ff_dim)
-
-        avg_pool  = GlobalAveragePooling1D()(x)
-        #max_pool = layers.GlobalMaxPooling1D()(x)
-        #conc = layers.concatenate([avg_pool, max_pool])
-        conc = Dense(self.units, activation='sigmoid')(avg_pool)
-        outputs = Dense(self.train_feature.shape[2], activation='sigmoid')(conc) 
-        model = Model(inputs, outputs)
-        #model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
-        model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
-
-        return model
-
     def Transfomer_conv(self, key_dim, num_heads, ff_dim, num_blocks):
         inputs = Input(shape=self.input_shape)
-        x = Conv1D(filters=self.units, kernel_size=self.train_feature.shape[1], padding='causal')(inputs)
+        x = Conv1D(filters=self.units, activation = 'relu', kernel_size=self.train_X.shape[1], padding='causal', dilation_rate = 1)(inputs)
+        x = SpatialDropout1D(self.dropout_rate)(x)
+        #x = Conv1D(filters=self.units, activation = 'relu', kernel_size=self.train_X.shape[1], padding='causal', dilation_rate = 2)(x)
+        #x = SpatialDropout1D(self.dropout_rate)(x)
+        #x = Conv1D(filters=self.units, activation = 'relu', kernel_size=self.train_X.shape[1], padding='causal', dilation_rate = 4)(x)
+        #x = SpatialDropout1D(self.dropout_rate)(x)
+
         for _ in range(num_blocks):
             x = self.transformer_encoder(x, key_dim, num_heads, ff_dim)
 
         avg_pool  = GlobalAveragePooling1D()(x)
-        #max_pool = layers.GlobalMaxPooling1D()(x)
-        #conc = layers.concatenate([avg_pool, max_pool])
-        conc = Dense(self.units, activation='sigmoid')(avg_pool)
-        outputs = Dense(self.train_feature.shape[2], activation='sigmoid')(conc) 
+        max_pool = GlobalMaxPooling1D()(x)
+        conc = concatenate([avg_pool, max_pool])
+        
+        outputs = Dense(self.train_X.shape[2], activation='sigmoid')(conc) 
         model = Model(inputs, outputs)
         #model.compile(loss=MeanSquaredError(), optimizer=Adam(), metrics=[MeanSquaredError()])
         model.compile(loss=BinaryCrossentropy(), optimizer=Adam(), metrics=[BinaryCrossentropy()])
@@ -191,11 +186,11 @@ class Models():
         return model
 
     def fit(self, model, epochs = 100, batch_size = 128, verbose = 1, show_loss = True):
-        from tensorflow.keras.callbacks import EarlyStopping,ModelCheckpoint
+        from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
         early_stopping = EarlyStopping(monitor='val_loss', verbose=verbose, patience=50)
     
-        history = model.fit(self.train_feature, self.train_label, batch_size = batch_size ,epochs=epochs,validation_split=0.2, verbose=verbose, callbacks = [early_stopping])
-        train_loss = model.evaluate(self.train_feature, self.train_label)[0]
+        history = model.fit(self.train_X, self.train_y, batch_size = batch_size ,epochs=epochs,validation_split=0.2, verbose=verbose, callbacks = [early_stopping])
+        train_loss = model.evaluate(self.train_X, self.train_y, verbose = 0)[0]
         print('train loss: {}'.format(train_loss))
 
         if show_loss:
@@ -205,19 +200,22 @@ class Models():
             plt.legend()
             plt.title('Model Loss')
             plt.show()
-        return model, history
+        return model
     
     def predict(self, model, show_plot = True):
-        predict = model.predict(self.test_feature)
-        test_loss = model.evaluate(self.test_feature, self.test_label)[0]
+        predict = model.predict(self.test_X)
+        test_loss = model.evaluate(self.test_X, self.test_y, verbose = 0)[0]
         print('test loss: {}'.format(test_loss))
         
         from sklearn.metrics import mean_squared_error, r2_score
-        print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_label, predict))))
-        print('r2: {}'.format(r2_score(self.test_label, predict)))
+        print('rmse: {}'.format(np.sqrt(mean_squared_error(self.test_y, predict))))
+        print('r2: {}'.format(r2_score(self.test_y, predict)))
 
-        cavity = int(self.df_experiment.columns[0]/2)
-        qubit = 0
+        test_y = self.scaler.inverse_transform(self.test_y)
+        predict = self.scaler.inverse_transform(predict)
+
+        #cavity = int(self.df_experiment.columns[0]/2)
+        #qubit = 0
         if len(self.df_experiment.columns) == 2:
             #labels = ["cavity {} & qubit {}".format(cavity, qubit), "cavity {} & qubit {}".format(cavity, qubit+1)]
             labels = ["|0>", "|1>"]
@@ -228,21 +226,21 @@ class Models():
         if show_plot:
             plt.figure(figsize=(14,8))
             plt.subplot(311)
-            plt.plot(self.df_experiment.index[-self.test_label.shape[0]:],predict)
+            plt.plot(self.df_experiment.index[-test_y.shape[0]:],predict)
             plt.title("Predict")
             plt.xlabel("time")
             plt.ylabel("probabilty")
             plt.legend(loc = 'upper right', labels = labels)
 
             plt.subplot(312)
-            plt.plot(self.df_experiment.index[-self.test_label.shape[0]:], self.test_label)
+            plt.plot(self.df_experiment.index[-self.test_y.shape[0]:], test_y)
             plt.title("Test Experiment")
             plt.xlabel("time")
             plt.ylabel("probabilty")
             plt.legend(loc = 'upper right', labels = labels)
 
             plt.subplot(313)
-            plt.plot(self.df_theory.index[-self.test_label.shape[0]:], self.test_label)
+            plt.plot(self.df_theory.index[-self.test_y.shape[0]:], self.df_theory.iloc[-self.test_y.shape[0]:].values)
             plt.title("Test Theory")
             plt.xlabel("time")
             plt.ylabel("probabilty")
@@ -259,7 +257,6 @@ class Experiment():
         self.kai = -2*np.pi*0.18
 
         #model fit setting
-        self.split_ratio = 0.75
         self.time_step = 10
         self.qubit_initial = qubit_initial
         self.cavity_initial = cavity_initial
@@ -269,25 +266,23 @@ class Experiment():
         self.t_i, self.t_f = t_i, t_f
 
         #transformer setting
-        self.key_dim = 256
-        self.num_heads = 4
-        self.ff_dim = 128
-        self.num_blocks = 2
+        self.key_dim = 16
+        self.num_heads = 2
+        self.ff_dim = 64
+        self.num_blocks = 1
 
-    def Run_system(self, model = 'LSTM', epochs=100, batch_size =100):
-        qs = Quantum_System(omega_r=self.omega_r, kai=self.kai, qubit_initial=self.qubit_initial, cavity_initial=self.cavity_initial, superposition=self.superposition)
+    def Run_system(self, model = 'BiLSTM', epochs=100, batch_size =256):
+        qs = Quantum_System(qubit_initial=self.qubit_initial, cavity_initial=self.cavity_initial, superposition=self.superposition)
         df_experiment, df_theory = qs.monte_carlo(n_sample=self.n_samples,  n_times=self.n_times, t_i=self.t_i, t_f=self.t_f)
         Model = Models(qunatum_system=qs, df_experiment = df_experiment, df_theory=df_theory)
         if model == 'LSTM':
             rnn = Model.LSTM()
         elif model == 'BiLSTM':
             rnn = Model.BiLSTM()
-        elif model == 'Transformer':
-            rnn = Model.Transfomer(key_dim=self.key_dim, num_heads=self.num_heads, ff_dim = self.ff_dim, num_blocks=self.num_blocks)
         elif model == 'Transformer_conv':
             rnn = Model.Transfomer_conv(key_dim=self.key_dim, num_heads=self.num_heads, ff_dim = self.ff_dim, num_blocks=self.num_blocks)
         else:
             print('Error')
 
-        rnn, _ = Model.fit(rnn,epochs=epochs, batch_size = batch_size, verbose=0, show_loss = True)
+        rnn = Model.fit(rnn,epochs=epochs, batch_size = batch_size, verbose=0, show_loss = False)
         _ =  Model.predict(rnn,show_plot=True)
